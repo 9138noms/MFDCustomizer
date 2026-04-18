@@ -1,0 +1,16 @@
+bin/
+obj/
+*.user
+.vs/
+*.suo
+*.ide
+*.swp
+.idea/
+
+# runtime artifacts (the plugin's working dir — not source)
+mfd_*.png
+*.slots.json
+
+# heavyweight bundled binaries (download separately or via release attachment)
+yt-dlp.exe
+ffmpeg.exe
