@@ -809,21 +809,47 @@ namespace MFDCustomizer
                 Log.LogInfo($"[URL] Resolving: {url}");
                 string directUrl = url;
                 bool needsStreaming = false;
+                bool downloadedLocally = false;
                 try
                 {
                     string ytdlpExe = FindYtDlp();
+                    bool isLive = url.Contains("twitch.tv");   // Twitch is always live
+                    bool isYouTube = url.Contains("youtube.com") || url.Contains("youtu.be");
+
                     if (ytdlpExe != null)
                     {
-                        var resolved = ResolveWithYtDlp(ytdlpExe, url);
-                        if (resolved != null)
+                        // For YouTube (non-live), download full mp4 locally — streaming the resolved
+                        // direct URL rarely works in Unity VideoPlayer because YouTube serves DASH /
+                        // separate video+audio streams that VideoPlayer can't mux.
+                        if (isYouTube && !isLive)
                         {
-                            directUrl = resolved;
-                            if (directUrl.Contains(".m3u8") || url.Contains("twitch.tv")) needsStreaming = true;
-                            Log.LogInfo($"[URL] Resolved in {sw.Elapsed.TotalSeconds:F1}s live={needsStreaming}");
+                            resolveStatus = "Downloading from YouTube via yt-dlp (may take ~30s-2m)...";
+                            var localFile = DownloadWithYtDlp(ytdlpExe, url);
+                            if (localFile != null)
+                            {
+                                directUrl = "file:///" + localFile.Replace('\\', '/');
+                                downloadedLocally = true;
+                                Log.LogInfo($"[URL] Downloaded in {sw.Elapsed.TotalSeconds:F1}s → {localFile}");
+                            }
+                            else
+                            {
+                                Log.LogWarning($"[URL] Download failed after {sw.Elapsed.TotalSeconds:F1}s — falling back to direct URL");
+                            }
                         }
-                        else
+
+                        if (!downloadedLocally)
                         {
-                            Log.LogWarning($"[URL] yt-dlp failed to resolve after {sw.Elapsed.TotalSeconds:F1}s — passing URL directly to VideoPlayer");
+                            var resolved = ResolveWithYtDlp(ytdlpExe, url);
+                            if (resolved != null)
+                            {
+                                directUrl = resolved;
+                                if (directUrl.Contains(".m3u8") || isLive) needsStreaming = true;
+                                Log.LogInfo($"[URL] Resolved in {sw.Elapsed.TotalSeconds:F1}s live={needsStreaming}");
+                            }
+                            else
+                            {
+                                Log.LogWarning($"[URL] yt-dlp failed to resolve after {sw.Elapsed.TotalSeconds:F1}s — passing URL directly to VideoPlayer");
+                            }
                         }
                     }
                     pendingUrlPlay = new PendingPlay
@@ -993,6 +1019,58 @@ namespace MFDCustomizer
                 if (proc.ExitCode != 0) return null;
                 return stdout.Split('\n')[0].Trim();
             } catch { return null; }
+        }
+
+        // Download full video to a local mp4 — needed for YouTube because VideoPlayer can't play
+        // DASH / separated video+audio streams that yt-dlp --get-url returns.
+        // Uses bundled ffmpeg (PATH) to merge video+audio into a muxed H.264+AAC mp4.
+        private string DownloadWithYtDlp(string ytdlpExe, string url)
+        {
+            try
+            {
+                string tempDir = Path.Combine(Path.GetTempPath(), "MFDCustomizer");
+                Directory.CreateDirectory(tempDir);
+                string outBase = Path.Combine(tempDir, $"yt_{DateTime.Now.Ticks}");
+                string outTemplate = outBase + ".%(ext)s";
+
+                string ffmpeg = FindFfmpeg();
+                string ffLocation = ffmpeg != null ? $"--ffmpeg-location \"{Path.GetDirectoryName(ffmpeg)}\" " : "";
+
+                // Prefer H.264 + AAC muxed mp4. Fallback to any best mp4, then best anything.
+                string fmt = "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4]/best";
+                string args = $"{ffLocation}-f \"{fmt}\" --merge-output-format mp4 --no-playlist --no-part -o \"{outTemplate}\" \"{url}\"";
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ytdlpExe,
+                    Arguments = args,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                var proc = Process.Start(psi);
+                // Drain pipes in background so buffers don't deadlock
+                new Thread(() => { try { proc.StandardOutput.ReadToEnd(); } catch { } }) { IsBackground = true }.Start();
+                string stderr = proc.StandardError.ReadToEnd();
+                proc.WaitForExit(600000); // 10 min max
+                if (proc.ExitCode != 0)
+                {
+                    Log.LogWarning($"yt-dlp download exit {proc.ExitCode}: {stderr.Substring(0, Math.Min(stderr.Length, 500))}");
+                    return null;
+                }
+                // yt-dlp may have picked ext .mp4 / .mkv / etc — find what it wrote
+                foreach (var f in Directory.GetFiles(tempDir, Path.GetFileName(outBase) + ".*"))
+                {
+                    if (new FileInfo(f).Length > 0) return f;
+                }
+                return null;
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"DownloadWithYtDlp: {e.Message}");
+                return null;
+            }
         }
 
         private string CaptureSegment(string ffmpegExe, string m3u8Url, int idx)
