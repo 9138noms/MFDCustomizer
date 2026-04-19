@@ -15,7 +15,7 @@ using UnityEngine.Video;
 
 namespace MFDCustomizer
 {
-    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.0")]
+    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.1")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin Instance;
@@ -272,7 +272,7 @@ namespace MFDCustomizer
                 }
             };
 
-            Log.LogInfo($"MFD Customizer v1.0.0 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
+            Log.LogInfo($"MFD Customizer v1.0.1 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
 
             // Warm up yt-dlp / ffmpeg in background so first URL play isn't blocked by Defender scan
             Thread warmup = new Thread(() =>
