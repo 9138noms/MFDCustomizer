@@ -15,7 +15,7 @@ using UnityEngine.Video;
 
 namespace MFDCustomizer
 {
-    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.1")]
+    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.2")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin Instance;
@@ -238,6 +238,10 @@ namespace MFDCustomizer
         private class PendingPlay { public string slotName; public string url; public string m3u8; public string title; }
         private volatile PendingPlay pendingUrlPlay;
 
+        // Local file (image downloaded from URL) to play via PlayMediaOnSlot on next Tick
+        private class PendingLocalFile { public string slotName; public string localPath; }
+        private volatile PendingLocalFile pendingLocalFile;
+
         // ====================================================================
         void Awake()
         {
@@ -272,7 +276,7 @@ namespace MFDCustomizer
                 }
             };
 
-            Log.LogInfo($"MFD Customizer v1.0.1 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
+            Log.LogInfo($"MFD Customizer v1.0.2 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
 
             // Warm up yt-dlp / ffmpeg in background so first URL play isn't blocked by Defender scan
             Thread warmup = new Thread(() =>
@@ -500,6 +504,12 @@ namespace MFDCustomizer
         {
             if (pendingSegmentSwitch != null) HandleSegmentSwitch();
             if (pendingUrlPlay != null) FlushPendingUrl();
+            if (pendingLocalFile != null)
+            {
+                var lf = pendingLocalFile; pendingLocalFile = null;
+                try { PlayMediaOnSlot(lf.slotName, lf.localPath); }
+                catch (Exception e) { Log.LogError($"[URL] local file play: {e.Message}"); }
+            }
 
             // MFD dump — any time
 
@@ -805,8 +815,31 @@ namespace MFDCustomizer
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 isResolving = true;
-                resolveStatus = "Resolving URL via yt-dlp...";
+                resolveStatus = "Resolving URL...";
                 Log.LogInfo($"[URL] Resolving: {url}");
+
+                // Image URL — download directly, bypass yt-dlp entirely
+                if (IsImageUrl(url))
+                {
+                    try
+                    {
+                        resolveStatus = "Downloading image...";
+                        var imgPath = DownloadImage(url);
+                        if (imgPath != null)
+                        {
+                            pendingLocalFile = new PendingLocalFile { slotName = slot, localPath = imgPath };
+                            Log.LogInfo($"[URL] Image downloaded in {sw.Elapsed.TotalSeconds:F1}s → {imgPath}");
+                        }
+                        else
+                        {
+                            Log.LogWarning($"[URL] Image download failed after {sw.Elapsed.TotalSeconds:F1}s");
+                        }
+                    }
+                    catch (Exception e) { Log.LogError($"[URL] image thread: {e.Message}"); }
+                    finally { isResolving = false; resolveStatus = ""; }
+                    return;
+                }
+
                 string directUrl = url;
                 bool needsStreaming = false;
                 bool downloadedLocally = false;
@@ -1024,6 +1057,47 @@ namespace MFDCustomizer
         // Download full video to a local mp4 — needed for YouTube because VideoPlayer can't play
         // DASH / separated video+audio streams that yt-dlp --get-url returns.
         // Uses bundled ffmpeg (PATH) to merge video+audio into a muxed H.264+AAC mp4.
+        private static readonly string[] IMG_EXTS = { ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp" };
+
+        private bool IsImageUrl(string url)
+        {
+            try
+            {
+                // Strip query string / fragment for extension check
+                string path = url.Split('?', '#')[0].ToLowerInvariant();
+                foreach (var ext in IMG_EXTS) if (path.EndsWith(ext)) return true;
+                return false;
+            } catch { return false; }
+        }
+
+        private string DownloadImage(string url)
+        {
+            try
+            {
+                string tempDir = Path.Combine(Path.GetTempPath(), "MFDCustomizer");
+                Directory.CreateDirectory(tempDir);
+                string path = url.Split('?', '#')[0].ToLowerInvariant();
+                string ext = ".png";
+                foreach (var e in IMG_EXTS) if (path.EndsWith(e)) { ext = e; break; }
+                string outFile = Path.Combine(tempDir, $"img_{DateTime.Now.Ticks}{ext}");
+
+                // TLS 1.2 for https
+                System.Net.ServicePointManager.SecurityProtocol |= (System.Net.SecurityProtocolType)3072;
+                using (var client = new System.Net.WebClient())
+                {
+                    client.Headers.Add("User-Agent", "MFDCustomizer/1.0");
+                    client.DownloadFile(url, outFile);
+                }
+                if (File.Exists(outFile) && new FileInfo(outFile).Length > 0) return outFile;
+                return null;
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"DownloadImage: {e.Message}");
+                return null;
+            }
+        }
+
         private string DownloadWithYtDlp(string ytdlpExe, string url)
         {
             try
