@@ -15,7 +15,7 @@ using UnityEngine.Video;
 
 namespace MFDCustomizer
 {
-    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.3")]
+    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.4")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin Instance;
@@ -276,7 +276,7 @@ namespace MFDCustomizer
                 }
             };
 
-            Log.LogInfo($"MFD Customizer v1.0.3 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
+            Log.LogInfo($"MFD Customizer v1.0.4 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
 
             // Warm up yt-dlp / ffmpeg in background so first URL play isn't blocked by Defender scan
             Thread warmup = new Thread(() =>
@@ -339,7 +339,7 @@ namespace MFDCustomizer
         {
             mediaFiles.Clear();
             string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-            foreach (var ext in new[] { "*.mp4", "*.webm", "*.avi", "*.mov", "*.png", "*.jpg", "*.jpeg" })
+            foreach (var ext in new[] { "*.mp4", "*.webm", "*.avi", "*.mov", "*.png", "*.jpg", "*.jpeg", "*.gif" })
                 mediaFiles.AddRange(Directory.GetFiles(pluginDir, ext).Where(f => !Path.GetFileName(f).StartsWith("mfd_")));
             mediaFiles.Sort();
             foreach (var f in mediaFiles) Log.LogInfo($"  Media: {Path.GetFileName(f)}");
@@ -687,6 +687,35 @@ namespace MFDCustomizer
         {
             if (!File.Exists(mediaPath)) { Log.LogError($"File missing: {mediaPath}"); return; }
             if (mfdCanvas == null && !AcquireMFDCanvas()) { Log.LogWarning("MFD canvas not available — sit in cockpit"); return; }
+
+            // GIF: Unity can't decode animated GIFs. Convert to mp4 via ffmpeg (background thread),
+            // queue the resulting file via pendingLocalFile so the main thread plays it as a video.
+            if (Path.GetExtension(mediaPath).ToLowerInvariant() == ".gif")
+            {
+                string gifPath = mediaPath;
+                string slot = slotName;
+                new Thread(() =>
+                {
+                    isResolving = true;
+                    resolveStatus = "Converting GIF → MP4 via ffmpeg...";
+                    try
+                    {
+                        var mp4 = ConvertGifToMp4(gifPath);
+                        if (mp4 != null)
+                        {
+                            pendingLocalFile = new PendingLocalFile { slotName = slot, localPath = mp4 };
+                            Log.LogInfo($"[GIF] converted → {mp4}");
+                        }
+                        else
+                        {
+                            Log.LogWarning($"[GIF] conversion failed: {gifPath}");
+                        }
+                    }
+                    catch (Exception e) { Log.LogError($"[GIF] convert thread: {e.Message}"); }
+                    finally { isResolving = false; resolveStatus = ""; }
+                }) { IsBackground = true }.Start();
+                return;
+            }
 
             // Re-detect aircraft, but never downgrade to Default (transient failure guard)
             var sec = DetectAircraftSection();
@@ -1131,6 +1160,51 @@ namespace MFDCustomizer
             catch (Exception e)
             {
                 Log.LogWarning($"DownloadImage: {e.Message}");
+                return null;
+            }
+        }
+
+        // Convert animated GIF to an H.264 mp4 so Unity's VideoPlayer can play it (loops naturally).
+        // Result is cached next to the source as <source>.mp4 — skip re-convert on subsequent plays.
+        private string ConvertGifToMp4(string gifPath)
+        {
+            try
+            {
+                string ffmpegExe = FindFfmpeg();
+                if (ffmpegExe == null) { Log.LogWarning("ffmpeg not found — install ffmpeg.exe in plugin folder to play GIFs"); return null; }
+
+                string mp4Path = Path.ChangeExtension(gifPath, ".mp4");
+                // Cache: if mp4 exists and is newer than the gif, reuse it
+                if (File.Exists(mp4Path) && new FileInfo(mp4Path).Length > 0 &&
+                    File.GetLastWriteTimeUtc(mp4Path) >= File.GetLastWriteTimeUtc(gifPath))
+                    return mp4Path;
+
+                // -vf scale=trunc(iw/2)*2:trunc(ih/2)*2 → H.264 needs even dimensions
+                string args = $"-y -i \"{gifPath}\" -movflags faststart -pix_fmt yuv420p " +
+                              $"-vf \"scale=trunc(iw/2)*2:trunc(ih/2)*2\" \"{mp4Path}\"";
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ffmpegExe,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                var proc = Process.Start(psi);
+                new Thread(() => { try { proc.StandardOutput.ReadToEnd(); } catch { } }) { IsBackground = true }.Start();
+                string stderr = proc.StandardError.ReadToEnd();
+                proc.WaitForExit(60000);
+                if (proc.ExitCode != 0)
+                {
+                    Log.LogWarning($"ffmpeg gif→mp4 exit {proc.ExitCode}: {stderr.Substring(0, Math.Min(stderr.Length, 400))}");
+                    return null;
+                }
+                return (File.Exists(mp4Path) && new FileInfo(mp4Path).Length > 0) ? mp4Path : null;
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"ConvertGifToMp4: {e.Message}");
                 return null;
             }
         }
