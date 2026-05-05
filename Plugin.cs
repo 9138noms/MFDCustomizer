@@ -15,7 +15,7 @@ using UnityEngine.Video;
 
 namespace MFDCustomizer
 {
-    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.4")]
+    [BepInPlugin("com.noms.mfdcustomizer", "MFD Customizer", "1.0.5")]
     public class Plugin : BaseUnityPlugin
     {
         internal static Plugin Instance;
@@ -208,6 +208,7 @@ namespace MFDCustomizer
         private string editingSlot = null;
         private bool isSelectingSource = false;
         private string sourceTargetSlot = null;
+        private int sourcePage = 0; // current page in source picker (9 files per page)
         private bool isEnteringUrl = false;
         private bool urlFocused = false;
         private string urlInput = "";
@@ -276,7 +277,7 @@ namespace MFDCustomizer
                 }
             };
 
-            Log.LogInfo($"MFD Customizer v1.0.4 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
+            Log.LogInfo($"MFD Customizer v1.0.5 loaded. {mediaFiles.Count} media file(s). Menu={menuKey.Value}");
 
             // Warm up yt-dlp / ffmpeg in background so first URL play isn't blocked by Defender scan
             Thread warmup = new Thread(() =>
@@ -623,6 +624,7 @@ namespace MFDCustomizer
                     {
                         sourceTargetSlot = slotKeys[i];
                         isSelectingSource = true;
+                        sourcePage = 0;
                         menuOpen = false;
                     }
                     return;
@@ -636,23 +638,43 @@ namespace MFDCustomizer
             {
                 isSelectingSource = false;
                 sourceTargetSlot = null;
+                sourcePage = 0;
                 menuOpen = true;
                 return;
             }
-            for (int i = 1; i <= 9 && i <= mediaFiles.Count; i++)
+            // Page navigation when there are more than 9 files
+            int totalPages = (mediaFiles.Count + 8) / 9;
+            if (totalPages > 1)
             {
-                if (Input.GetKeyDown(KeyCode.Alpha0 + i))
+                if (Input.GetKeyDown(KeyCode.PageDown) || Input.GetKeyDown(KeyCode.RightArrow))
                 {
-                    string file = mediaFiles[i - 1];
+                    sourcePage = (sourcePage + 1) % totalPages;
+                    return;
+                }
+                if (Input.GetKeyDown(KeyCode.PageUp) || Input.GetKeyDown(KeyCode.LeftArrow))
+                {
+                    sourcePage = (sourcePage - 1 + totalPages) % totalPages;
+                    return;
+                }
+            }
+            int pageStart = sourcePage * 9;
+            int pageEnd = Mathf.Min(pageStart + 9, mediaFiles.Count);
+            for (int slot = 1; slot <= 9 && (pageStart + slot - 1) < pageEnd; slot++)
+            {
+                if (Input.GetKeyDown(KeyCode.Alpha0 + slot))
+                {
+                    string file = mediaFiles[pageStart + slot - 1];
                     PlayMediaOnSlot(sourceTargetSlot, file);
                     isSelectingSource = false;
                     sourceTargetSlot = null;
+                    sourcePage = 0;
                     return;
                 }
             }
             if (Input.GetKeyDown(KeyCode.Alpha0))
             {
                 isSelectingSource = false;
+                sourcePage = 0;
                 isEnteringUrl = true;
                 urlInput = "";
                 urlFocused = false;
@@ -1423,17 +1445,29 @@ namespace MFDCustomizer
 
         private void DrawSourceMenu()
         {
-            int w = 560, h = 60 + Mathf.Min(mediaFiles.Count, 9) * 22 + 60;
+            int totalPages = Mathf.Max(1, (mediaFiles.Count + 8) / 9);
+            if (sourcePage >= totalPages) sourcePage = 0;
+            int pageStart = sourcePage * 9;
+            int pageEnd = Mathf.Min(pageStart + 9, mediaFiles.Count);
+            int rows = pageEnd - pageStart;
+
+            int w = 640, h = 60 + Mathf.Max(rows, 1) * 22 + 80;
             int x = Screen.width/2 - w/2, y = Screen.height/2 - h/2;
-            GUI.Box(new Rect(x, y, w, h), $"Source for slot: {sourceTargetSlot}");
+            string title = $"Source for slot: {sourceTargetSlot}" +
+                           (totalPages > 1 ? $"   —   Page {sourcePage + 1} / {totalPages}" : "");
+            GUI.Box(new Rect(x, y, w, h), title);
             int cy = y + 30;
-            for (int i = 0; i < mediaFiles.Count && i < 9; i++)
+            for (int i = pageStart; i < pageEnd; i++)
             {
-                GUI.Label(new Rect(x + 20, cy, w - 40, 22), $"[{i+1}] {Path.GetFileName(mediaFiles[i])}");
+                int slot = i - pageStart + 1;
+                GUI.Label(new Rect(x + 20, cy, w - 40, 22), $"[{slot}] {Path.GetFileName(mediaFiles[i])}");
                 cy += 22;
             }
             cy += 10;
-            GUI.Label(new Rect(x + 20, cy, w - 40, 22), "[0] Enter URL    [Esc] back");
+            string hint = totalPages > 1
+                ? "[1-9] pick  |  [PgUp/PgDn or ←/→] page  |  [0] URL  |  [Esc] back"
+                : "[1-9] pick  |  [0] URL  |  [Esc] back";
+            GUI.Label(new Rect(x + 20, cy, w - 40, 22), hint);
         }
 
         private void DrawUrlInput()
